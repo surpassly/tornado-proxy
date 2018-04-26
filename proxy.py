@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python
 '''
 owtf is an OWASP+PTES-focused try to unite great tools & facilitate pentesting
@@ -41,8 +42,60 @@ import ssl
 import tornado.escape
 import tornado.httputil
 import os
+import re
 
 from socket_wrapper import wrap_socket
+
+from sqlalchemy import *
+from sqlalchemy.exc import *
+
+import HTMLParser
+html_parser = HTMLParser.HTMLParser()
+
+
+class IndexDB(object):
+    def __init__(self):
+        engine = create_engine('sqlite:///data.db', encoding='utf-8', echo=False)
+        metadata = MetaData(engine)
+        try:
+            self.table = Table('index', metadata, autoload=True)
+        except NoSuchTableError:
+            self.table = Table('index', metadata,
+                               Column('id', Integer, primary_key=True, nullable=False, autoincrement=True),
+                               Column('nickname', String(32)),
+                               Column('title', String(64)),
+                               Column('url', String(512)),
+                               )
+            self.table.create()
+            Index('idx_nickname_title', self.table.c.nickname, self.table.c.title)  # 联合索引
+
+    def insert_or_update(self, nickname, title, url):
+        rs = self.table.select().where(and_(self.table.c.nickname == nickname, self.table.c.title == title)).execute()
+        if not rs.fetchone():
+            self.table.insert().values(nickname=nickname, title=title, url=url).execute()
+
+    def filter(self, nickname):
+        rs = self.table.select().where(self.table.c.nickname == nickname).order_by(desc('id')).execute()
+        res = rs.fetchall()[:10]
+        return res
+
+
+index_db = IndexDB()
+
+
+class WebHandler(tornado.web.RequestHandler):
+    SUPPORTED_METHODS = ['GET']
+
+    @tornado.web.asynchronous
+    def get(self, data):
+        if data in ['wechat', 'weixin', 'wx']:
+            nickname = self.get_argument('nickname')
+            res = index_db.filter(nickname=nickname)
+            if res:
+                res = tornado.escape.json_encode([{"title": r[2], "url": r[3]} for r in res])
+                self.write(res)
+        self.finish()
+
 
 class ProxyHandler(tornado.web.RequestHandler):
     """
@@ -56,11 +109,35 @@ class ProxyHandler(tornado.web.RequestHandler):
 
     response_body = None
 
+    INDEXES_CACHE = {}
+    urls = []
+
     def request_handler(self, request):
         pass
 
     def response_handler(self, request, response, response_body):
-        pass
+        if self.request.host in self.request.uri.split('/') or self.request.uri.startswith('http://'):
+            url = self.request.uri
+        else:
+            url = self.request.protocol + "://" + self.request.host + self.request.uri
+        # 微信规则 获取url并存储
+        if re.match(r'https://mp\.weixin\.qq\.com/mp/profile_ext\?action=home.+pass_ticket', url, re.S):
+            try:
+                nickname = re.search(r'var nickname = "(.+?)"', response_body).groups()[0]
+            except:
+                # 操作频繁
+                return
+            titles = re.findall(r"&quot;title&quot;:&quot;(.+?)&quot;,&quot;digest&quot;:", response_body)
+            indexes = re.findall(r"&quot;content_url&quot;:&quot;(\S*?)&quot;,&quot;source_url&quot;:", response_body)
+            indexes = [html_parser.unescape(html_parser.unescape(index)).replace(r'\\/', r'/') for index in indexes if index]
+            for title, index in reversed(zip(titles, indexes)):
+                index_db.insert_or_update(unicode(nickname, 'utf-8'), unicode(title, 'utf-8'), index)
+        elif re.match(r'', url, re.S):
+            # TODO: 得到微信名称和微信号对应关系
+            pass
+        else:
+            # TODO: 其它APP
+            pass
 
     def save_handler(self, request, response, response_body):
         pass
@@ -86,6 +163,8 @@ class ProxyHandler(tornado.web.RequestHandler):
         * Once ssl stream is formed between browser and proxy, the requests are
           then processed by this function
         """
+        if self.request.uri == '/favicon.ico':  # 针对浏览器
+            return
 
         # Data for handling headers through a streaming callback
         restricted_headers = ['Content-Length',
@@ -100,7 +179,6 @@ class ProxyHandler(tornado.web.RequestHandler):
         # This function is a callback after the async client gets the full response
         # This method will be improvised with more headers from original responses
         def handle_response(response):
-
             self.response_body = response.body if response.body else self.response_body
 
             # Hook response
@@ -119,7 +197,7 @@ class ProxyHandler(tornado.web.RequestHandler):
                     if header not in restricted_headers:
                         self.set_header(header, value)
             # print("\n\n")
-            #self.set_header('Content-Type', response.headers['Content-Type'])
+            # self.set_header('Content-Type', response.headers['Content-Type'])
             self.finish()
 
             # Save request and response
@@ -139,7 +217,7 @@ class ProxyHandler(tornado.web.RequestHandler):
         # The requests that come through ssl streams are relative requests, so transparent
         # proxying is required. The following snippet decides the url that should be passed
         # to the async client
-        if self.request.host in self.request.uri.split('/'):  # Normal Proxy Request
+        if self.request.host in self.request.uri.split('/') or self.request.uri.startswith('http://'):  # Normal Proxy Request
             url = self.request.uri
         else:  # Transparent Proxy Request
             url = self.request.protocol + "://" + self.request.host + self.request.uri
@@ -197,7 +275,11 @@ class ProxyHandler(tornado.web.RequestHandler):
 
     @tornado.web.asynchronous
     def connect(self):
-        if os.path.isfile(self.cakey) and os.path.isfile(self.cacert) and os.path.isdir(self.certdir):
+        # if os.path.isfile(self.cakey) and os.path.isfile(self.cacert) and os.path.isdir(self.certdir):
+        #     self.connect_intercept()
+        # else:
+        #     self.connect_relay()
+        if self.request.host in ['mp.weixin.qq.com:443']:  # 访问规则
             self.connect_intercept()
         else:
             self.connect_relay()
@@ -232,7 +314,7 @@ class ProxyHandler(tornado.web.RequestHandler):
             upstream = tornado.iostream.SSLIOStream(s)
             upstream.connect((host, int(port)), start_tunnel, host)
         except Exception:
-            print(("[!] Dropping CONNECT request to " + self.request.uri))
+            print "[!] Dropping CONNECT request to " + self.request.uri
             self.write(b"404 Not Found :P")
             self.finish()
 
@@ -292,10 +374,11 @@ class ProxyHandler(tornado.web.RequestHandler):
 
 
 class ProxyServer(object):
-
-    def __init__(self, handler,inbound_ip="0.0.0.0", inbound_port=8088, outbound_ip=None, outbound_port=None):
-
-        self.application = tornado.web.Application(handlers=[(r".*", handler)], debug=False, gzip=True)
+    def __init__(self, handler,inbound_ip="0.0.0.0", inbound_port=8888, outbound_ip=None, outbound_port=None):
+        self.application = tornado.web.Application(handlers=[
+            (r"^/geturls/(\w*)", WebHandler),
+            (r".*", ProxyHandler),
+        ], debug=False, gzip=True)
         self.application.inbound_ip = inbound_ip
         self.application.inbound_port = inbound_port
         self.application.outbound_ip = outbound_ip
@@ -307,10 +390,10 @@ class ProxyServer(object):
     # "0" equals the number of cores present in a machine
     def start(self, instances=0):
         try:
-            #total = Profiler()
-            #app = tornado.web.Application(handlers=[(r".*", handler)], debug=False, gzip=True)
-            #global http_server  # Easy to add SSLIOStream later in the request handlers
-            #http_server = tornado.httpserver.HTTPServer(app)
+            # total = Profiler()
+            # app = tornado.web.Application(handlers=[(r".*", handler)], debug=False, gzip=True)
+            # global http_server  # Easy to add SSLIOStream later in the request handlers
+            # http_server = tornado.httpserver.HTTPServer(app)
             self.server.bind(self.application.inbound_port, address=self.application.inbound_ip)
 
             # To run any number of instances
@@ -323,6 +406,7 @@ class ProxyServer(object):
     def stop(self):
         tornado.ioloop.IOLoop.instance().stop()
         print("[!] Shutting down the proxy server")
+
 
 if __name__ == "__main__":
     try:
