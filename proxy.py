@@ -35,6 +35,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 import tornado.httpserver
 import tornado.ioloop
 import tornado.iostream
+import tornado.gen
 import tornado.web
 import tornado.curl_httpclient
 import socket
@@ -43,6 +44,8 @@ import tornado.escape
 import tornado.httputil
 import os
 import re
+import json
+from collections import defaultdict
 
 from socket_wrapper import wrap_socket
 
@@ -53,6 +56,7 @@ import HTMLParser
 html_parser = HTMLParser.HTMLParser()
 
 
+# TODO: 重新设计数据库
 class IndexDB(object):
     def __init__(self):
         engine = create_engine('sqlite:///data.db', encoding='utf-8', echo=False)
@@ -80,21 +84,15 @@ class IndexDB(object):
         return res
 
 
-index_db = IndexDB()
+# index_db = IndexDB()
 
 
 class WebHandler(tornado.web.RequestHandler):
     SUPPORTED_METHODS = ['GET']
 
-    @tornado.web.asynchronous
+    @tornado.gen.coroutine
     def get(self, data):
-        if data in ['wechat', 'weixin', 'wx']:
-            nickname = self.get_argument('nickname')
-            res = index_db.filter(nickname=nickname)
-            if res:
-                res = tornado.escape.json_encode([{"title": r[2], "url": r[3]} for r in res])
-                self.write(res)
-        self.finish()
+        self.write('Hello World!')
 
 
 class ProxyHandler(tornado.web.RequestHandler):
@@ -109,9 +107,6 @@ class ProxyHandler(tornado.web.RequestHandler):
 
     response_body = None
 
-    INDEXES_CACHE = {}
-    urls = []
-
     def request_handler(self, request):
         pass
 
@@ -120,24 +115,15 @@ class ProxyHandler(tornado.web.RequestHandler):
             url = self.request.uri
         else:
             url = self.request.protocol + "://" + self.request.host + self.request.uri
-        # 微信规则 获取url并存储
-        if re.match(r'https://mp\.weixin\.qq\.com/mp/profile_ext\?action=home.+pass_ticket', url, re.S):
-            try:
-                nickname = re.search(r'var nickname = "(.+?)"', response_body).groups()[0]
-            except:
-                # 操作频繁
-                return
-            titles = re.findall(r"&quot;title&quot;:&quot;(.+?)&quot;,&quot;digest&quot;:", response_body)
-            indexes = re.findall(r"&quot;content_url&quot;:&quot;(\S*?)&quot;,&quot;source_url&quot;:", response_body)
-            indexes = [html_parser.unescape(html_parser.unescape(index)).replace(r'\\/', r'/') for index in indexes if index]
-            for title, index in reversed(zip(titles, indexes)):
-                index_db.insert_or_update(unicode(nickname, 'utf-8'), unicode(title, 'utf-8'), index)
-        elif re.match(r'', url, re.S):
-            # TODO: 得到微信名称和微信号对应关系
-            pass
-        else:
-            # TODO: 其它APP
-            pass
+        # TODO: 减少业务逻辑
+        if re.match(r'http://[a-z]{2}\.snssdk\.com/api/news/feed/v86/', url, re.S):
+            res = json.loads(response_body)
+            if res.get("message") == "success":
+                for d in res["data"]:
+                    content = json.loads(d["content"])
+                    if 'article_url' in content:
+                        index = content['article_url']
+                        print index
 
     def save_handler(self, request, response, response_body):
         pass
@@ -156,6 +142,7 @@ class ProxyHandler(tornado.web.RequestHandler):
             except KeyError:
                 self._reason = tornado.escape.native_str("Unknown Error")
 
+    # TODO: 改为tornado.gen.coroutine
     @tornado.web.asynchronous
     def get(self):
         """
@@ -191,12 +178,11 @@ class ProxyHandler(tornado.web.RequestHandler):
             self.set_status(response.code)
             for header, value in list(response.headers.items()):
                 if header == "Set-Cookie":
-                    # print(("%s: %s" % (header, value)))
                     self.add_header(header, value)
                 else:
                     if header not in restricted_headers:
                         self.set_header(header, value)
-            # print("\n\n")
+
             # self.set_header('Content-Type', response.headers['Content-Type'])
             self.finish()
 
@@ -233,6 +219,7 @@ class ProxyHandler(tornado.web.RequestHandler):
         # pycurl is needed for curl client
 
         async_client = tornado.curl_httpclient.CurlAsyncHTTPClient()
+        # TODO: gzip问题
         request = tornado.httpclient.HTTPRequest(
                 url=url,
                 method=self.request.method,
@@ -250,7 +237,7 @@ class ProxyHandler(tornado.web.RequestHandler):
         try:
             async_client.fetch(request, callback=handle_response)
         except Exception as e:
-            print(e)
+            print e
 
     # The following 5 methods can be handled through the above implementation
     @tornado.web.asynchronous
@@ -276,10 +263,7 @@ class ProxyHandler(tornado.web.RequestHandler):
     @tornado.web.asynchronous
     def connect(self):
         # if os.path.isfile(self.cakey) and os.path.isfile(self.cacert) and os.path.isdir(self.certdir):
-        #     self.connect_intercept()
-        # else:
-        #     self.connect_relay()
-        if self.request.host in ['mp.weixin.qq.com:443']:  # 访问规则
+        if re.match(r"mp\.weixin\.qq\.com:443|(?!ib)[a-z]{2}\.snssdk\.com:443", self.request.host):
             self.connect_intercept()
         else:
             self.connect_relay()
@@ -374,7 +358,7 @@ class ProxyHandler(tornado.web.RequestHandler):
 
 
 class ProxyServer(object):
-    def __init__(self, handler,inbound_ip="0.0.0.0", inbound_port=8888, outbound_ip=None, outbound_port=None):
+    def __init__(self, handler, inbound_ip="0.0.0.0", inbound_port=8888, outbound_ip=None, outbound_port=None):
         self.application = tornado.web.Application(handlers=[
             (r"^/geturls/(\w*)", WebHandler),
             (r".*", ProxyHandler),

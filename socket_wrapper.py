@@ -87,7 +87,8 @@ def wrap_socket(socket, domain, success=None, failure=None, io=None, **options):
             elif exc.args[0] == ssl.SSL_ERROR_WANT_WRITE:
                 new_state |= io.WRITE
             else:
-                raise
+                # raise
+                print exc
 
         if new_state != state[0]:
             state[0] = new_state
@@ -96,7 +97,6 @@ def wrap_socket(socket, domain, success=None, failure=None, io=None, **options):
     # # set up handshake state; use a list as a mutable cell.
     io = io or ioloop.IOLoop.instance()
     state = [io.ERROR]
-
     # # Wrap the socket; swap out handlers.
     io.remove_handler(socket.fileno())
     wrapped = ssl.SSLSocket(socket, **options)
