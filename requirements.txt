@@ -1,4 +1,5 @@
 tornado
 pycurl
 pyopenssl
+kafka-python
 sqlalchemy

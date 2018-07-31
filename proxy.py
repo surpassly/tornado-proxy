@@ -142,8 +142,7 @@ class ProxyHandler(tornado.web.RequestHandler):
             except KeyError:
                 self._reason = tornado.escape.native_str("Unknown Error")
 
-    # TODO: 改为tornado.gen.coroutine
-    @tornado.web.asynchronous
+    @tornado.gen.coroutine
     def get(self):
         """
         * This function handles all requests except the connect request.
@@ -235,32 +234,32 @@ class ProxyHandler(tornado.web.RequestHandler):
                 validate_cert=False)
 
         try:
-            async_client.fetch(request, callback=handle_response)
+            yield async_client.fetch(request, callback=handle_response)
         except Exception as e:
             print e
 
     # The following 5 methods can be handled through the above implementation
-    @tornado.web.asynchronous
+    @tornado.gen.coroutine
     def post(self):
-        return self.get()
+        yield self.get()
 
-    @tornado.web.asynchronous
+    @tornado.gen.coroutine
     def head(self):
-        return self.get()
+        yield self.get()
 
-    @tornado.web.asynchronous
+    @tornado.gen.coroutine
     def put(self):
-        return self.get()
+        yield self.get()
 
-    @tornado.web.asynchronous
+    @tornado.gen.coroutine
     def delete(self):
-        return self.get()
+        yield self.get()
 
-    @tornado.web.asynchronous
+    @tornado.gen.coroutine
     def options(self):
-        return self.get()
+        yield self.get()
 
-    @tornado.web.asynchronous
+    @tornado.gen.coroutine
     def connect(self):
         # if os.path.isfile(self.cakey) and os.path.isfile(self.cacert) and os.path.isdir(self.certdir):
         if re.match(r"mp\.weixin\.qq\.com:443|(?!ib)[a-z]{2}\.snssdk\.com:443", self.request.host):
@@ -296,7 +295,7 @@ class ProxyHandler(tornado.web.RequestHandler):
         try:
             s = ssl.wrap_socket(socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0))
             upstream = tornado.iostream.SSLIOStream(s)
-            upstream.connect((host, int(port)), start_tunnel, host)
+            yield upstream.connect((host, int(port)), start_tunnel, host)
         except Exception:
             print "[!] Dropping CONNECT request to " + self.request.uri
             self.write(b"404 Not Found :P")
@@ -352,9 +351,9 @@ class ProxyHandler(tornado.web.RequestHandler):
         upstream = tornado.iostream.IOStream(s)
 
         if self.application.outbound_ip and self.application.outbound_port:
-            upstream.connect((self.application.outbound_ip, self.application.outbound_port), start_proxy_tunnel)
+            yield upstream.connect((self.application.outbound_ip, self.application.outbound_port), start_proxy_tunnel)
         else:
-            upstream.connect((host, int(port)), start_tunnel)
+            yield upstream.connect((host, int(port)), start_tunnel)
 
 
 class ProxyServer(object):
